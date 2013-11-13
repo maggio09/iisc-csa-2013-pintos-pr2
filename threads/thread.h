@@ -1,12 +1,9 @@
 #ifndef THREADS_THREAD_H
 #define THREADS_THREAD_H
 
-#define PRIORITY
-
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
-#include "threads/sleep.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -101,38 +98,30 @@ struct thread
     uint32_t *pagedir;                  /* Page directory. */
 #endif
 
-    /*Project Modification for sleepers starts. */
-    struct bed bednoptr;
-    /*Project Modification for sleepers ends. */
-
-    /*Project Modification for priority starts. */
-    struct list locks_held;             /* List of locks held by the thread. */
-    struct lock *blocked_by;            /* The lock for which the thread is 
-                                           waiting for. */
-    int initial_priority;               /* Stores the initial_priority. */
-    /* Project Modification for priority ends. */
-
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
+
+    // Needed to keep track of locks thread holds
+    struct list lock_list;
+
+    // Needed for file system sys calls
+    struct list file_list;
+    int fd;
+
+    // Needed for wait / exec sys calls
+    struct list child_list;
+    tid_t parent;
+    // Points to child_process struct in parent's child list
+    struct child_process* cp;
+
+    // Needed for denying writes to executables
+    struct file* executable;
   };
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
-
-/* Duke: Typedef the priority order function begins. */
-typedef bool priority_order_func (const struct list_elem *a,
-                             const struct list_elem *b,
-                             void *aux);
-/* Duke: Typedef the priority order function ends. */
-#ifdef PRIORITY
-/* Duke: Added the following functions to implement priority scheduling. */
-bool thread_priority_order_relaxed (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
-bool thread_priority_order_strict (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
-void thread_yield_sort (priority_order_func *f);
-/* Duke: Addition ends for priority scheduling. */
-#endif
 
 void thread_init (void);
 void thread_start (void);
@@ -158,16 +147,14 @@ typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
-void thread_set_priority (int priority);
-void thread_set_priority_tid (struct thread *tid, int priority);
-
-/* Duke: Added the following to update priority. */
-int thread_priority_self_update (void);
-/* Duke: Addition ends. */
+void thread_set_priority (int);
 
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+bool thread_alive (int pid);
+void release_locks (void);
 
 #endif /* threads/thread.h */

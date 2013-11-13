@@ -3,7 +3,6 @@
 
 #include <round.h>
 #include <stdint.h>
-#include "threads/sleep.h"
 
 /* Number of timer interrupts per second. */
 #define TIMER_FREQ 100

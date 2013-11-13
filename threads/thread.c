@@ -5,21 +5,25 @@
 #include <stdio.h>
 #include <string.h>
 #include "threads/flags.h"
-#include "threads/sleep.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
+#include "threads/malloc.h"
 #include "threads/palloc.h"
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+#include "userprog/syscall.h"
 #endif
 
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
 #define THREAD_MAGIC 0xcd6abf4b
+
+#define MIN_FD 2
+#define NO_PARENT -1
 
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
@@ -72,7 +76,6 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
-
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -94,7 +97,6 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
-  sleep_list_init ();
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -177,11 +179,6 @@ thread_create (const char *name, int priority,
   enum intr_level old_level;
 
   ASSERT (function != NULL);
-  /* Project Modification for priority starts. */
-  ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
-                                        /* The priority should be within
-                                           range. */
-  /* Project Modification for priority ends. */
 
   /* Allocate thread. */
   t = palloc_get_page (PAL_ZERO);
@@ -214,15 +211,13 @@ thread_create (const char *name, int priority,
 
   intr_set_level (old_level);
 
+  // Add child process to child list
+  t->parent = thread_tid();
+  struct child_process *cp = add_child_process(t->tid);
+  t->cp = cp;
+
   /* Add to run queue. */
   thread_unblock (t);
-
-  /* Project Modification for priority begins */
-  /* If the creating thread itself is of lower priority then yield. */
-  if(priority > thread_current()->priority) 
-  {
-    thread_yield_sort(thread_priority_order_relaxed);
-  }/**/
 
   return tid;
 }
@@ -260,17 +255,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-
-  /* Project Modification for priority begins. */
-  /* We update "list_push_back (&ready_list, &t->elem)"
-     for adding to ready list in ordered way */
-#ifdef PRIORITY
-  list_insert_ordered (&ready_list, &t->elem, thread_priority_order_relaxed, NULL);
-#else
   list_push_back (&ready_list, &t->elem);
-#endif
-  /* Project Modification for priority ends. */
-  
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -323,6 +308,7 @@ thread_exit (void)
      and schedule another process.  That process will destroy us
      when it calls thread_schedule_tail(). */
   intr_disable ();
+  release_locks();
   list_remove (&thread_current()->allelem);
   thread_current ()->status = THREAD_DYING;
   schedule ();
@@ -335,34 +321,17 @@ void
 thread_yield (void) 
 {
   struct thread *cur = thread_current ();
-  /* Project Modification for priority begins. */
-  /* Moved the steps to more generic function. We leave this untouched
-     in order to let legacy code run */
-  thread_yield_sort (thread_priority_order_strict);
-  /* Project Modification for priority ends. */
-}
-
-/* Duke: Add the following to make locked threads yield */
-void
-thread_yield_sort(priority_order_func *order_by)
-{
   enum intr_level old_level;
   
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
-  struct thread *cur = thread_current ();
-  if (cur != idle_thread)
-  { 
-    /* We remove this to "list_push_back (&ready_list, &cur->elem)"
-       to generate an ordered priority ready_list */
-    list_insert_ordered (&ready_list, &cur->elem, order_by, NULL);
-  }
+  if (cur != idle_thread) 
+    list_push_back (&ready_list, &cur->elem);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
 }
-/* Duke: Addition ends */
 
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
@@ -382,80 +351,11 @@ thread_foreach (thread_action_func *func, void *aux)
 }
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
-/* Project Modification to adapt for priority begins. */
 void
 thread_set_priority (int new_priority) 
 {
-  struct thread *cur = thread_current();
-  ASSERT(PRI_MIN <= new_priority && new_priority <= PRI_MAX);
-#ifndef PRIORITY
-  cur->priority = new_priority;
-#else
-  cur->initial_priority = new_priority;
-  thread_priority_self_update ();
-  thread_yield_sort (thread_priority_order_relaxed);
-#endif
+  thread_current ()->priority = new_priority;
 }
-/* Project Modification to adapt for priority ends. */
-
-
-#ifdef PRIORITY
-/* Duke: Adding function to update priority on event of priority donation 
-  begins. */
-void thread_set_priority_tid (struct thread *t, int new_priority)
-{
-  ASSERT(is_thread(t));
-  ASSERT(PRI_MIN <= new_priority && new_priority <= PRI_MAX);
-  t->priority = new_priority;
-}
-/* Duke: Addition ends. */
-
-/* Duke: Adding function to update ready_list on event *//*
-void
-reorder_ready_list (void)
-{
-  if (thread_current () != idle_thread && 
-    list_entry(list_begin(&ready_list), struct thread, elem)->priority > thread_current ()->priority)
-  {
-    thread_yield_sort (thread_priority_order_relaxed);
-  }
-}
-/* Duke: Addition ends. */
-
-/* Duke: Added thread_priority_self_update to update based on locks held. */
-int
-thread_priority_self_update (void)
-{
-  struct list_elem *el;
-  int max_priority = thread_current ()->initial_priority;
-  if (list_empty (&thread_current ()->locks_held))
-  {
-    thread_current ()->priority = max_priority;
-    return max_priority;
-  }
-  struct thread *cur = thread_current ();
-  for (el = list_begin (&cur->locks_held); el != list_end (&cur->locks_held);
-    el = list_next (el))
-  {
-    struct lock *l = list_entry (el, struct lock, lock_elem);
-    list_sort (&l->semaphore.waiters, thread_priority_order_relaxed, NULL);
-    int priority = list_entry (list_begin (&l->semaphore.waiters), struct thread, elem)->priority;
-    if (priority > max_priority)
-    {
-      max_priority = priority;
-    }
-  }
-  if (cur->priority < max_priority)
-  {
-    thread_yield_sort (thread_priority_order_relaxed);
-  }
-  cur->priority = max_priority;
-  return max_priority;
-}
-/* Duke: Addition ends. */
-
-#endif
-
 
 /* Returns the current thread's priority. */
 int
@@ -579,12 +479,19 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
-  /* Project modification for priority scheduling begins. */
-  t->initial_priority = priority;
-  /* Project modification for priority scheduling begins. */
   t->magic = THREAD_MAGIC;
-  list_init (&t->locks_held);
   list_push_back (&all_list, &t->allelem);
+
+  t->executable = NULL;
+
+  list_init(&t->lock_list);
+
+  list_init(&t->file_list);
+  t->fd = MIN_FD;
+
+  list_init(&t->child_list);
+  t->cp = NULL;
+  t->parent = NO_PARENT;
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -608,7 +515,6 @@ alloc_frame (struct thread *t, size_t size)
 static struct thread *
 next_thread_to_run (void) 
 {
-  sleep_wakeup ();
   if (list_empty (&ready_list))
     return idle_thread;
   else
@@ -697,38 +603,38 @@ allocate_tid (void)
 
   return tid;
 }
-
-/* Duke: Adding the following
-      static bool thread_priority_order_relaxed (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
-      static bool thread_priority_order_strict (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
-*/
-bool
-thread_priority_order_relaxed (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
-{
-  struct thread *at, *bt;
-  
-  ASSERT (a != NULL && b != NULL);
-  
-  at = list_entry (a, struct thread, elem);
-  bt = list_entry (b, struct thread, elem);
-  
-  return (at->priority >= bt->priority);
-}
-
-bool
-thread_priority_order_strict (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
-{
-  struct thread *at, *bt;
-  
-  ASSERT (a != NULL && b != NULL);
-  
-  at = list_entry (a, struct thread, elem);
-  bt = list_entry (b, struct thread, elem);
-  
-  return (at->priority > bt->priority);
-}
-/*Duke: Addition ends for function definition for priority scheduling. */
 
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+bool thread_alive (int pid)
+{
+  struct list_elem *e;
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      if (t->tid == pid)
+	{
+	  return true;
+	}
+    }
+  return false;
+}
+
+void release_locks (void)
+{
+  struct thread *t = thread_current();
+  struct list_elem *next, *e = list_begin(&t->lock_list);
+
+  while (e != list_end (&t->lock_list))
+    {
+      next = list_next(e);
+      struct lock *l = list_entry (e, struct lock, elem);
+      lock_release(l);
+      list_remove(&l->elem);
+      e = next;
+    }
+}

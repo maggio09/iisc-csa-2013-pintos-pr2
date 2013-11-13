@@ -7,7 +7,6 @@
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
-#include "threads/sleep.h"
   
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -24,11 +23,6 @@ static int64_t ticks;
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
-
-/* Duke - added these to resolve the functions */
-extern void sleep_insert (int64_t ticks);
-extern void sleep_wakeup (void);
-/* Addition by Duke ends*/
 
 static intr_handler_func timer_interrupt;
 static bool too_many_loops (unsigned loops);
@@ -95,26 +89,11 @@ timer_elapsed (int64_t then)
 void
 timer_sleep (int64_t ticks) 
 {
-  /* Vestigial Begin
   int64_t start = timer_ticks ();
-  Vestigial End*/
 
   ASSERT (intr_get_level () == INTR_ON);
-
-  /* Modification by Duke begins*/
-  //Removing trivial ticks < 0
-  if (ticks < 0)
-  {
-    return;
-  }
-  //Try to get a bed
-  sleep_insert (ticks);
-  /* Modification by Duke ends */
-
-  /* Vestigial Begin
   while (timer_elapsed (start) < ticks) 
     thread_yield ();
-  Vestigial End*/
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -193,7 +172,6 @@ timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
-  sleep_wakeup ();
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
